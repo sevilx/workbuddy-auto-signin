@@ -82,7 +82,8 @@ powershell -ExecutionPolicy Bypass -File .\update-upstream.ps1 -Apply
 
 加 `-NoPush` 可以只合并不推送，先本地验证。
 
-合并成功后脚本会自己跑两道检查，任一不过就**不会推送**：
+合并成功后脚本会自己跑两道检查，任一不过就**不会推送**（想单独复查就加 `-VerifyOnly`，
+它不联网、不动工作区，手工解决冲突后特别有用）：
 
 1. `Test-ForkIntact` —— 8 个独有文件在不在、README 的两个 FORK 标记块在不在
 2. `python -m py_compile signin.py` —— 上游合并结果语法是否正常
@@ -97,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File .\update-upstream.ps1 -Apply
 git status                       # 看哪些文件 UU
 # 手工编辑，保留双方内容
 git add -A && git commit --no-edit
-powershell -ExecutionPolicy Bypass -File .\update-upstream.ps1   # 复查标记是否完整
+powershell -ExecutionPolicy Bypass -File .\update-upstream.ps1 -VerifyOnly   # 只复查标记，不联网
 git push origin main
 ```
 

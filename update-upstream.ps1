@@ -3,8 +3,9 @@
 # 作者：Ben
 #
 # 用法（在任意目录均可运行）：
-#     powershell -ExecutionPolicy Bypass -File .\update-upstream.ps1           # 只预览有什么更新
-#     powershell -ExecutionPolicy Bypass -File .\update-upstream.ps1 -Apply    # 真的合并并推送
+#     powershell -ExecutionPolicy Bypass -File .\update-upstream.ps1               # 只预览有什么更新
+#     powershell -ExecutionPolicy Bypass -File .\update-upstream.ps1 -Apply        # 真的合并并推送
+#     powershell -ExecutionPolicy Bypass -File .\update-upstream.ps1 -VerifyOnly   # 只查 fork 内容是否完整
 #
 # 工作方式：
 #   origin   = https://github.com/sevilx/workbuddy-auto-signin     （你的 fork）
@@ -17,7 +18,8 @@
 
 param(
     [switch]$Apply,
-    [switch]$NoPush
+    [switch]$NoPush,
+    [switch]$VerifyOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -97,6 +99,18 @@ function Test-ForkIntact {
 
 # --- 0. 前置检查 ---
 if (-not (Test-Path (Join-Path $Repo ".git"))) { Fail "$Repo 不是 git 仓库" }
+
+# 只做完整性复查：不联网、不动工作区。手工解决过冲突后先跑这个。
+if ($VerifyOnly) {
+    $problems = Test-ForkIntact
+    if ($problems.Count -eq 0) {
+        Write-Host "OK：$($ForkFiles.Count) 个独有文件与 README 两个标记块都在" -ForegroundColor Green
+        exit 0
+    }
+    Write-Host "本 fork 的内容有缺失：" -ForegroundColor Red
+    $problems | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+    exit 1
+}
 
 $remotes = (Git remote) | ForEach-Object { $_.Trim() }
 if ($remotes -notcontains "upstream") {
