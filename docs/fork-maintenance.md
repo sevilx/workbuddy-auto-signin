@@ -33,6 +33,28 @@ CI 会在合并时立刻发现本 fork 的凭据格式不再兼容，而不是�
 - `README.md` —— 在「模式 B」末尾插了「🐧 Linux / NAS · Windows 提供凭据（跨机）」小节
 - `.gitignore` —— 追加了 `auth.export.json` / `.sync-cache.json` / `sync.log` / `sync-config.json`
 
+## CI
+
+上游的 `tests.yml` 用 `python -m unittest discover -s tests`，跑 ubuntu / windows / macos ×
+Python 3.10 / 3.13 六个矩阵。**不要引入 pytest**——CI 环境没装，会让六个 job 全报
+`ModuleNotFoundError`（这个坑已经踩过一次）。
+
+本地用同一条命令自检：
+
+```bash
+python -m unittest discover -s tests
+```
+
+fork 的 push 不一定自动触发 CI。手动跑：
+
+```bash
+gh workflow run tests.yml --repo sevilx/workbuddy-auto-signin --ref main
+gh run list --repo sevilx/workbuddy-auto-signin --limit 1
+```
+
+注意 `--repo` 不能省：在本仓库目录里执行 `gh workflow run` 时，gh 可能按 workflow ID
+解析到**上游**仓库，直接 403（没有上游 admin 权限）。
+
 ## 上游更新了怎么办
 
 先预览（不改动任何东西）：
