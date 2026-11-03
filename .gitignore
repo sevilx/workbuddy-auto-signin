@@ -7,3 +7,9 @@ __pycache__/
 .workbuddy/
 signin.log
 qoder_signin.log
+
+# 跨机同步：本机配置/明文凭据/缓存一律不进仓库
+auth.export.json
+.sync-cache.json
+sync.log
+sync-config.json

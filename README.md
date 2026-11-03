@@ -253,6 +253,25 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/workbuddy-auto-signin.pl
 >
 > 日志由 launchd 重定向而来，`auto` 模式**每轮都会追加一行**（不像 Windows 的 `silent-poll` 会跳过空跑），且 launchd 不做轮转。介意体积就定期清空，或把模板里的 `StandardOutPath` 指到你自己管理的路径。
 
+#### 🐧 Linux / NAS · Windows 提供凭据（跨机）
+
+Linux 没有 WorkBuddy 桌面端，而 Windows 上的凭据是 `$wbEncrypted` 信封、密钥与本机绑定，**文件直接拷过去解不开**。正确做法是在 Windows 侧解密成明文再同步：
+
+```bash
+python sync-auth.py doctor    # 检查 SSH 与密钥
+python sync-auth.py deploy    # 上传脚本 + 注册 systemd + 推送凭据
+python sync-auth.py check     # 远端只读状态查询
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-sync-windows.ps1   # 每 2 小时自动同步
+```
+
+远端会得到 `workbuddy-signin.timer`（每天 00:05）与 `workbuddy-signin-poll.timer`（01/05/09/13/17/21 点），日志在 `/var/log/workbuddy-signin.log`。
+
+完整步骤、token 生命周期与排错见 [docs/remote-debian.md](docs/remote-debian.md)；
+本 fork 如何跟进上游更新见 [docs/fork-maintenance.md](docs/fork-maintenance.md)。
+
 #### 🔁 成长中心轮询说明（两个系统通用）
 
 > [!IMPORTANT]
