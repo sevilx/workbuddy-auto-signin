@@ -9,8 +9,11 @@
 # 工作方式：
 #   origin   = https://github.com/sevilx/workbuddy-auto-signin     （你的 fork）
 #   upstream = https://github.com/88lin/workbuddy-auto-signin      （原作者）
-#   本地改动集中在 5 个新增文件 + README/.gitignore 的两处插入，上游改动集中在
-#   signin.py，冲突面很小；万一 README 撞车，按提示保留双方内容即可。
+#
+# 本 fork 的内容几乎全在「上游没有的新文件」里，对上游文件的改动只有 README 两个
+# 带 FORK 标记的小块（<!-- FORK:TOP-* --> 与 <!-- FORK:NAS-* -->）和 .gitignore 末尾几行，
+# 所以上游改动（集中在 signin.py）与本 fork 基本不重叠。
+# 合并成功后会自动校验这些标记与文件是否还在，被吃掉就立刻报警。
 
 param(
     [switch]$Apply,
@@ -53,6 +56,43 @@ function Fail($msg) {
     Write-Host "已中止：$msg" -ForegroundColor Red
     [Console]::Out.Flush()
     exit 1
+}
+
+# 本 fork 独有的文件：上游永远不会有，合并时不该消失
+$ForkFiles = @(
+    "sync-auth.py",
+    "install-debian.sh",
+    "install-sync-windows.ps1",
+    "update-upstream.ps1",
+    "sync-config.example.json",
+    "docs/nas-deploy.md",
+    "docs/fork-maintenance.md",
+    "tests/test_sync_auth.py"
+)
+
+# README 里本 fork 的两个标记块：合并后必须都还在
+$ForkMarkers = @("FORK:TOP-START", "FORK:TOP-END", "FORK:NAS-START", "FORK:NAS-END")
+
+function Test-ForkIntact {
+    $problems = @()
+    foreach ($f in $ForkFiles) {
+        $p = Join-Path $Repo $f
+        if (-not (Test-Path -LiteralPath $p)) { $problems += "缺少文件：$f" }
+        elseif ((Get-Item -LiteralPath $p).Length -eq 0) { $problems += "文件被清空：$f" }
+    }
+    $readme = Join-Path $Repo "README.md"
+    if (-not (Test-Path -LiteralPath $readme)) {
+        $problems += "README.md 不见了"
+    } else {
+        $text = Get-Content -LiteralPath $readme -Raw
+        foreach ($m in $ForkMarkers) {
+            if ($text -notlike "*$m*") { $problems += "README 缺少标记：$m" }
+        }
+        if ($text -like "*docs/remote-debian.md*") {
+            $problems += "README 还引用旧文档名 docs/remote-debian.md（应为 docs/nas-deploy.md）"
+        }
+    }
+    return $problems
 }
 
 # --- 0. 前置检查 ---
@@ -113,13 +153,14 @@ if ($LASTEXITCODE -ne 0) {
 
 处理建议：
   1. 打开上面每个文件，搜索 <<<<<<< / ======= / >>>>>>>
-  2. 本 fork 独有的部分（sync-auth.py / install-debian.sh / install-sync-windows.ps1 /
-     docs/remote-debian.md）通常整段保留
-  3. README.md 若冲突：上游正文照收，再把本 fork 的「🐧 Linux / NAS」小节贴回去
+  2. 本 fork 独有的文件（sync-auth.py / install-debian.sh / install-sync-windows.ps1 /
+     docs/nas-deploy.md 等）通常整段保留
+  3. README.md 若冲突：上游正文照收，再把本 fork 的两个 FORK 标记块
+     （<!-- FORK:TOP-START --> 与 <!-- FORK:NAS-START --> 之间）原样贴回
   4. 改完执行：
         git -C "$Repo" add -A
         git -C "$Repo" commit --no-edit
-        git -C "$Repo" push origin main
+        powershell -ExecutionPolicy Bypass -File "$Repo\update-upstream.ps1"   # 复查标记是否完整
   5. 中途想放弃：git -C "$Repo" merge --abort
 
 "@ -ForegroundColor Yellow
@@ -129,7 +170,18 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "合并成功" -ForegroundColor Green
 
 # --- 3. 冒烟验证 ---
-Write-Host "`n[验证] signin.py 语法 ..." -NoNewline
+Write-Host "`n[验证] 本 fork 内容完整性 ..." -ForegroundColor Cyan
+$problems = Test-ForkIntact
+if ($problems.Count -eq 0) {
+    Write-Host "  OK：$($ForkFiles.Count) 个独有文件与 README 标记块都在" -ForegroundColor Green
+} else {
+    Write-Host "  合并把本 fork 的内容吃掉了：" -ForegroundColor Red
+    $problems | ForEach-Object { Write-Host "    - $_" -ForegroundColor Red }
+    Write-Host "  已停止推送。修好后重跑本脚本即可复查（合并结果仍在本地）。" -ForegroundColor Yellow
+    exit 1
+}
+
+Write-Host "[验证] signin.py 语法 ..." -NoNewline
 $py = (Get-Command python -ErrorAction SilentlyContinue).Source
 if ($py) {
     & $py -m py_compile (Join-Path $Repo "signin.py")

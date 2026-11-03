@@ -1,9 +1,10 @@
 # 维护这个 fork
 
 本仓库是 [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) 的 fork，
-在上游基础上加了「Windows → 局域网 Linux」的跨机方案。
+在上游基础上加了「Windows 提供凭据 → 局域网 Linux」的跨机方案（部署见
+[nas-deploy.md](nas-deploy.md)，日常只需三条命令：`setup` → `deploy` → 注册计划任务）。
 
-## 三个 remote
+## 两个 remote
 
 | remote | 地址 | 用途 |
 |---|---|---|
@@ -16,22 +17,30 @@
 
 | 文件 | 作用 |
 |---|---|
-| `sync-auth.py` | Windows 侧解密凭据并推送到 Linux |
+| `sync-auth.py` | Windows 侧解密凭据并推送到 Linux（含 `setup` 一键准备） |
 | `install-debian.sh` | Linux 侧 systemd timer 安装 |
 | `install-sync-windows.ps1` | Windows 侧定时同步任务 |
 | `update-upstream.ps1` | 本文件所描述的上游合并脚本 |
 | `sync-config.example.json` | 同步配置模板 |
-| `docs/remote-debian.md` | 跨机部署说明 |
+| `docs/nas-deploy.md` | 跨机部署手册（案例式，含换机迁移） |
 | `docs/fork-maintenance.md` | 本文件 |
 | `tests/test_sync_auth.py` | 契约测试：生成的明文凭据必须仍被 `signin.py` 接受 |
 
 最后那个测试是刻意加的：上游一旦调整 `_validate_session` / `build_headers` 的字段要求，
 CI 会在合并时立刻发现本 fork 的凭据格式不再兼容，而不是等到第二天签到失败才暴露。
 
-额外修改过的上游文件（合并时**容易冲突**，只有两处）：
+## 对上游文件只动了两处
 
-- `README.md` —— 在「模式 B」末尾插了「🐧 Linux / NAS · Windows 提供凭据（跨机）」小节
-- `.gitignore` —— 追加了 `auth.export.json` / `.sync-cache.json` / `sync.log` / `sync-config.json`
+为了把冲突面压到最小，对上游文件的改动被限制成两个位置：
+
+| 文件 | 改动 | 形态 |
+|---|---|---|
+| `README.md` | 顶部一条 fork 说明 + 「模式 B」末尾的跨机小节 | 各用一个 `<!-- FORK:*-START -->` / `<!-- FORK:*-END -->` 包住 |
+| `.gitignore` | 追加明文凭据、同步缓存、日志、本机配置 | 末尾几行，与上游条目不相邻 |
+
+标记块的作用是让冲突处理变成机械动作：**上游正文照收，两个标记块及其中内容原样保留**。
+`update-upstream.ps1` 会在合并成功后自动检查这些标记与上面 8 个文件是否都还在，
+少一个就拒绝推送。
 
 ## CI
 
@@ -73,16 +82,22 @@ powershell -ExecutionPolicy Bypass -File .\update-upstream.ps1 -Apply
 
 加 `-NoPush` 可以只合并不推送，先本地验证。
 
+合并成功后脚本会自己跑两道检查，任一不过就**不会推送**：
+
+1. `Test-ForkIntact` —— 8 个独有文件在不在、README 的两个 FORK 标记块在不在
+2. `python -m py_compile signin.py` —— 上游合并结果语法是否正常
+
 ### 撞冲突时
 
 冲突概率很低：上游的改动集中在 `signin.py`，本 fork 没碰它。真撞上基本只会在 `README.md`。
 
-处理原则：**上游正文照收，本 fork 的小节贴回去**。
+处理原则：**上游正文照收，两个 `FORK` 标记块原样贴回**。
 
 ```bash
 git status                       # 看哪些文件 UU
 # 手工编辑，保留双方内容
 git add -A && git commit --no-edit
+powershell -ExecutionPolicy Bypass -File .\update-upstream.ps1   # 复查标记是否完整
 git push origin main
 ```
 

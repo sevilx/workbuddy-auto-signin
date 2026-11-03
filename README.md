@@ -20,6 +20,13 @@
 >
 > 👤 作者：[88lin](https://dev.88lin.eu.org/) · 📦 仓库：[github.com/88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)
 
+<!-- FORK:TOP-START 本 fork 独有，合并上游时整段保留 -->
+> 🍴 **这是 fork**：在上游基础上加了一套「**Windows 提供凭据 → 局域网 Linux/NAS 定时签到**」的跨机方案
+> —— 凭据只由 Windows 产生，签到跑在常开的 Linux 上，远端 `signin.py` 保持原版。
+> 流程是 `setup` → 授权一次 → `deploy` → 注册计划任务，换电脑重来同样四步：
+> 见 [docs/nas-deploy.md](docs/nas-deploy.md)。
+<!-- FORK:TOP-END -->
+
 > [!TIP]
 > **⭐ 顺手点个 Star 再往下看**——签到接口是从桌面端逆向来的，腾讯改一版它就可能失效，修复都会第一时间推到这里。Star 一下，等哪天连签莫名其妙断了，你能一秒翻回这个仓库。
 
@@ -255,22 +262,36 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/workbuddy-auto-signin.pl
 
 #### 🐧 Linux / NAS · Windows 提供凭据（跨机）
 
-Linux 没有 WorkBuddy 桌面端，而 Windows 上的凭据是 `$wbEncrypted` 信封、密钥与本机绑定，**文件直接拷过去解不开**。正确做法是在 Windows 侧解密成明文再同步：
+<!-- FORK:NAS-START 本段为本 fork 独有内容，合并上游时整段保留（见 docs/fork-maintenance.md） -->
+
+**典型用法**：WorkBuddy 只装在一台 Windows 上（凭据只能由它产生），但那台机器不常开；真正跑签到的是局域网里常开的 Linux 小主机（NAS）。Windows 定期把**解密后的明文凭据**推过去，NAS 按点自己跑。
+
+为什么不能直接拷文件：Windows 的 `accessToken` 是 `$wbEncrypted` 信封，密钥来自客户端原生存储、**与这台机器绑定**，Linux 上拿到文件也解不开。所以由 Windows 侧解密再同步，NAS 上的 `signin.py` 保持原版不改。
+
+从零到跑通（**换电脑也是这四步**，示例地址 `192.168.1.100` 请换成你自己的）：
 
 ```bash
-python sync-auth.py doctor    # 检查 SSH 与密钥
-python sync-auth.py deploy    # 上传脚本 + 注册 systemd + 推送凭据
-python sync-auth.py check     # 远端只读状态查询
+git clone https://github.com/sevilx/workbuddy-auto-signin.git
+cd workbuddy-auto-signin
+python sync-auth.py setup --host 192.168.1.100   # 生成密钥 + 写配置 + 打印授权命令
+```
+
+把 `setup` 输出里 `authorize_commands.powershell` 那条粘到 PowerShell 执行（输一次 NAS 密码），然后：
+
+```bash
+python sync-auth.py deploy                       # 上传脚本 + 装 systemd + 推凭据 + 远端验收
 ```
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-sync-windows.ps1   # 每 2 小时自动同步
 ```
 
-远端会得到 `workbuddy-signin.timer`（每天 00:05）与 `workbuddy-signin-poll.timer`（01/05/09/13/17/21 点），日志在 `/var/log/workbuddy-signin.log`。
+NAS 上会得到 `workbuddy-signin.timer`（每天 00:05）与 `workbuddy-signin-poll.timer`（01/05/09/13/17/21 点补签 + 成长中心），日志在 `/var/log/workbuddy-signin.log`。
 
-完整步骤、token 生命周期与排错见 [docs/remote-debian.md](docs/remote-debian.md)；
-本 fork 如何跟进上游更新见 [docs/fork-maintenance.md](docs/fork-maintenance.md)。
+> 完整手册（前置条件、验收清单、换机迁移、排错、Token 生命周期）：[docs/nas-deploy.md](docs/nas-deploy.md)
+> · 上游更新怎么合并进来：[docs/fork-maintenance.md](docs/fork-maintenance.md)
+
+<!-- FORK:NAS-END -->
 
 #### 🔁 成长中心轮询说明（两个系统通用）
 
