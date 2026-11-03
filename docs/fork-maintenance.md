@@ -23,6 +23,10 @@
 | `sync-config.example.json` | 同步配置模板 |
 | `docs/remote-debian.md` | 跨机部署说明 |
 | `docs/fork-maintenance.md` | 本文件 |
+| `tests/test_sync_auth.py` | 契约测试：生成的明文凭据必须仍被 `signin.py` 接受 |
+
+最后那个测试是刻意加的：上游一旦调整 `_validate_session` / `build_headers` 的字段要求，
+CI 会在合并时立刻发现本 fork 的凭据格式不再兼容，而不是等到第二天签到失败才暴露。
 
 额外修改过的上游文件（合并时**容易冲突**，只有两处）：
 
