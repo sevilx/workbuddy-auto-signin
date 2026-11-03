@@ -17,6 +17,7 @@ access token 有效期 30 天、refreshtoken 60 天，且由桌面端负责续�
 
 用法
 ----
+    python sync-auth.py setup --host 192.168.1.100   # 新机器一键准备（生成密钥 + 写配置）
     python sync-auth.py doctor      # 只检查环境，不联网、不推送
     python sync-auth.py export      # 解密并写出本地 auth.export.json
     python sync-auth.py push        # 解密 + 推送到远端
@@ -127,6 +128,80 @@ def find_ssh(explicit=None):
     if found:
         return found
     return None
+
+
+def find_ssh_keygen(explicit=None):
+    """定位 ssh-keygen：优先取与 ssh 同目录的那个，避免又混进 MSYS 版。"""
+    if explicit:
+        return explicit
+    ssh = find_ssh()
+    if ssh:
+        name = "ssh-keygen.exe" if os.name == "nt" else "ssh-keygen"
+        candidate = os.path.join(os.path.dirname(ssh), name)
+        if os.path.isfile(candidate):
+            return candidate
+    return shutil.which("ssh-keygen")
+
+
+# 写进 sync-config.json 的字段（remote_auth 由 remote_dir 推导，不落盘）
+SETUP_KEYS = ("host", "user", "port", "identity", "remote_dir", "remote_python",
+              "expiry_warn_days", "force_repush_days")
+
+
+def _read_config_file():
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _config_for_write(cfg, existing=None):
+    """把当前生效的配置写成可落盘的 dict，保留文件里已有的其它字段。"""
+    data = dict(existing) if isinstance(existing, dict) else {}
+    for key in SETUP_KEYS:
+        value = cfg.get(key)
+        if value not in (None, ""):
+            data[key] = value
+    return data
+
+
+def _quote_local(path):
+    """本地命令里的路径加引号（Windows 用双引号，POSIX 用单引号）。"""
+    if os.name == "nt":
+        return '"%s"' % path
+    return "'%s'" % path.replace("'", "'\\''")
+
+
+def _authorize_commands(cfg, identity):
+    """生成把公钥装到远端的命令，供用户复制粘贴（需要一次密码登录）。
+
+    这是唯一需要人动手的一步：私钥留在本机，公钥必须由用户亲手写进远端
+    ``authorized_keys``——密码不该出现在脚本、配置或对话里。
+    """
+    target = "%s@%s" % (cfg["user"], cfg["host"])
+    pub = identity + ".pub"
+    port_opt = "" if int(cfg["port"]) == 22 else " -p %d" % int(cfg["port"])
+    remote = ("mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
+              "cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys")
+
+    # Windows 侧尽量用 $env:USERPROFILE：换一台电脑、换用户名都不用改命令
+    home = os.path.expanduser("~")
+    try:
+        rel = os.path.relpath(pub, home)
+    except ValueError:
+        rel = None
+    if rel and not rel.startswith("..") and not os.path.isabs(rel):
+        win_pub = "$env:USERPROFILE\\" + rel.replace("/", "\\")
+    else:
+        win_pub = pub.replace("/", "\\")
+
+    ssh_exe = '"$env:SystemRoot\\System32\\OpenSSH\\ssh.exe"'
+    return {
+        "powershell": 'type "%s" | & %s%s %s "%s"' % (win_pub, ssh_exe, port_opt, target, remote),
+        "posix": "ssh-copy-id -i %s%s %s" % (_quote_local(pub), port_opt, target),
+    }
 
 
 def _ssh_base(cfg):
@@ -389,6 +464,8 @@ def _fail(summary, code, out, err, cfg):
         hint = "（主机密钥校验失败：删掉 known_hosts 中该主机条目后重试）"
     elif code == 124:
         hint = "（SSH 超时：检查 %s 是否在线）" % cfg["host"]
+    elif "sudo" in (err or "") and ("terminal is required" in (err or "") or "password is required" in (err or "")):
+        hint = "（安装需要 root：给 %s 配免密 sudo，或直接用 root 账号部署）" % cfg["user"]
     return {"result": "ERROR", "report": summary + hint + ("：" + detail[-1] if detail else ""),
             "needs_attention": True}
 
@@ -457,9 +534,12 @@ def cmd_deploy(cfg):
 
     with open(installer, "rb") as f:
         installer_bytes = f.read()
-    code, out, err = ssh_run(
-        cfg, "bash -s -- %s" % _shell_quote(cfg["remote_dir"]),
-        stdin_bytes=installer_bytes, timeout=180)
+    # 允许非 root 账号部署：能免密 sudo 就自动提权。ssh 是非交互的，
+    # 所以必须用 sudo -n —— 需要密码时直接失败，而不是卡在等输入。
+    remote_dir_q = _shell_quote(cfg["remote_dir"])
+    install_cmd = ('if [ "$(id -u)" -eq 0 ]; then exec bash -s -- %s; '
+                   'else exec sudo -n bash -s -- %s; fi' % (remote_dir_q, remote_dir_q))
+    code, out, err = ssh_run(cfg, install_cmd, stdin_bytes=installer_bytes, timeout=180)
     if code != 0:
         return _fail("远端安装脚本执行失败", code, out, err, cfg), None
     steps.append("systemd 已注册")
@@ -480,6 +560,108 @@ def cmd_deploy(cfg):
         "remote_install_output": out.splitlines()[-6:] if out else [],
         "status": check,
     }, meta
+
+
+def cmd_setup(cfg):
+    """新机器一键准备：验本机凭据 → 生成密钥 → 写配置 → 输出授权命令。
+
+    刻意不联网授权、不猜密码：唯一的人工步骤（把公钥写进远端
+    ``authorized_keys``）由用户自己粘贴执行。
+    """
+    target = "%s@%s:%d" % (cfg["user"], cfg["host"], cfg["port"])
+    auth_file, looked = signin.find_auth_file()
+    if not auth_file:
+        return {
+            "result": "ERROR",
+            "report": "本机找不到 WorkBuddy 凭据，先在当前 Windows 上装好桌面端并登录一次"
+                      "（或设 WORKBUDDY_AUTH_FILE 指向凭据文件）",
+            "looked_in": looked,
+            "needs_attention": True,
+        }, None
+
+    ssh = find_ssh(cfg.get("ssh"))
+    if not ssh:
+        return {
+            "result": "ERROR",
+            "report": "未找到 ssh 客户端：Windows「设置 → 可选功能 → 添加 OpenSSH 客户端」",
+            "needs_attention": True,
+        }, None
+
+    identity = _identity_path(cfg)
+    key_created = False
+    if not os.path.isfile(identity):
+        keygen = find_ssh_keygen()
+        if not keygen:
+            return {
+                "result": "ERROR",
+                "report": "缺少私钥，且没找到 ssh-keygen：%s" % identity,
+                "needs_attention": True,
+            }, None
+        folder = os.path.dirname(identity)
+        if folder:
+            try:
+                os.makedirs(folder, exist_ok=True)
+            except OSError as e:
+                return {"result": "ERROR", "report": "创建 %s 失败：%s" % (folder, e),
+                        "needs_attention": True}, None
+        # 注释里不写主机名：authorized_keys 会长期留在远端，没必要带上本机身份
+        argv = [keygen, "-t", "ed25519", "-N", "", "-C", "workbuddy-auto-signin",
+                "-f", identity, "-q"]
+        try:
+            proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return {"result": "ERROR", "report": "生成密钥失败：%s" % e,
+                    "needs_attention": True}, None
+        if proc.returncode != 0 or not os.path.isfile(identity):
+            detail = proc.stderr.decode("utf-8", "replace").strip()
+            return {"result": "ERROR",
+                    "report": "生成密钥失败：%s" % (detail or "ssh-keygen 退出码 %s" % proc.returncode),
+                    "needs_attention": True}, None
+        key_created = True
+
+    out = {
+        "result": "OK",
+        "target": target,
+        "identity": identity,
+        "key_created": key_created,
+        "auth_file": auth_file,
+        "ssh": ssh,
+        "needs_attention": False,
+    }
+
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(_config_for_write(cfg, _read_config_file()), f,
+                      indent=2, ensure_ascii=False)
+            f.write("\n")
+        out["config_file"] = CONFIG_FILE
+    except OSError as e:
+        out.update(result="ERROR", needs_attention=True,
+                   report="写入 %s 失败：%s" % (CONFIG_FILE, e))
+        return out, None
+
+    pub_path = identity + ".pub"
+    try:
+        with open(pub_path, "r", encoding="utf-8") as f:
+            out["public_key"] = f.read().strip()
+    except OSError:
+        out["public_key"] = ""
+
+    commands = _authorize_commands(cfg, identity)
+    code, sout, _ = ssh_run(cfg, "echo CONNECTED", timeout=20)
+    if code == 0 and "CONNECTED" in sout:
+        out.update(result="SETUP_READY", ssh_ready=True,
+                   report="配置已写入，SSH 免密已通（%s），直接部署" % target,
+                   next_step="python sync-auth.py deploy")
+    else:
+        out.update(result="NEED_KEY_AUTH", ssh_ready=False,
+                   authorize_commands=commands,
+                   report="配置已写入，但公钥还没装到 %s：把 authorize_commands.powershell "
+                          "粘到 PowerShell 跑一次（会提示输入一次远端密码），然后重新执行本命令"
+                          % target,
+                   next_step="python sync-auth.py setup（授权后重跑，或直接 deploy）")
+    return out, None
 
 
 def cmd_doctor(cfg):
@@ -521,7 +703,8 @@ def cmd_doctor(cfg):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="同步 WorkBuddy 凭据到局域网 Linux 主机")
     parser.add_argument("action", nargs="?", default="push",
-                        choices=["doctor", "export", "push", "deploy", "check", "silent-push"])
+                        choices=["setup", "doctor", "export", "push", "deploy", "check",
+                                 "silent-push"])
     parser.add_argument("--host"), parser.add_argument("--user"), parser.add_argument("--port")
     parser.add_argument("--identity"), parser.add_argument("--remote-dir")
     parser.add_argument("--remote-python"), parser.add_argument("--ssh")
@@ -534,7 +717,9 @@ def main(argv=None):
     started = time.time()
     try:
         cfg = _merge_config(args)
-        if action == "doctor":
+        if action == "setup":
+            result, _ = cmd_setup(cfg)
+        elif action == "doctor":
             result, _ = cmd_doctor(cfg)
         elif action == "export":
             result, _ = cmd_export(cfg, args.out)
@@ -561,7 +746,7 @@ def main(argv=None):
     else:
         print(line)
     return 0 if result.get("result") in ("OK", "EXPORTED", "PUSHED", "SKIPPED",
-                                         "DEPLOYED", "AUTH_READY") else 1
+                                         "DEPLOYED", "AUTH_READY", "SETUP_READY") else 1
 
 
 if __name__ == "__main__":

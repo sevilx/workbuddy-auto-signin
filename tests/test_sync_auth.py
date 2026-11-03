@@ -204,5 +204,76 @@ class TestSshDiscovery(unittest.TestCase):
         self.assertNotIn("PortableGit", found)
 
 
+class TestSetupHelpers(unittest.TestCase):
+    """setup 的两块纯逻辑：写配置、生成授权命令。
+
+    真正落地的是「另一台电脑 clone 下来能不能照抄」这件事，
+    所以这里锁的是命令形状和配置字段，而不是覆盖率。
+    """
+
+    def _cfg(self, **over):
+        cfg = dict(sync_auth.DEFAULTS)
+        cfg.update(over)
+        return cfg
+
+    def _identity(self, name="workbuddy_debian"):
+        return os.path.join(os.path.expanduser("~"), ".ssh", name)
+
+    def test_config_for_write_keeps_unknown_keys(self):
+        data = sync_auth._config_for_write(self._cfg(host="192.0.2.7"), {"note": "手工加的"})
+        self.assertEqual(data["host"], "192.0.2.7")
+        self.assertEqual(data["note"], "手工加的")
+
+    def test_config_for_write_skips_empty_and_derived(self):
+        data = sync_auth._config_for_write(self._cfg(remote_python="", remote_auth="/x/auth.json"))
+        self.assertNotIn("remote_python", data)   # 空值不落盘，避免把默认值写成空
+        self.assertNotIn("remote_auth", data)     # 由 remote_dir 推导，不重复存
+
+    def test_config_for_write_covers_defaults(self):
+        data = sync_auth._config_for_write(self._cfg())
+        for key in ("host", "user", "port", "identity", "remote_dir"):
+            self.assertIn(key, data)
+
+    def test_authorize_commands_target_and_payload(self):
+        cmds = sync_auth._authorize_commands(self._cfg(), self._identity())
+        self.assertIn("root@192.168.1.100", cmds["powershell"])
+        self.assertIn("authorized_keys", cmds["powershell"])
+        self.assertIn("root@192.168.1.100", cmds["posix"])
+        self.assertIn("ssh-copy-id", cmds["posix"])
+        # 只公钥出场，且不能重复拼出 .pub.pub
+        self.assertIn("workbuddy_debian.pub", cmds["powershell"])
+        self.assertIn("workbuddy_debian.pub", cmds["posix"])
+        self.assertNotIn(".pub.pub", cmds["powershell"] + cmds["posix"])
+
+    def test_authorize_commands_uses_userprofile_when_under_home(self):
+        """换电脑、换用户名都不用改命令 —— 家目录下必须写成 $env:USERPROFILE。"""
+        cmds = sync_auth._authorize_commands(self._cfg(), self._identity())
+        self.assertIn("$env:USERPROFILE", cmds["powershell"])
+
+    def test_authorize_commands_nonstandard_port(self):
+        cmds = sync_auth._authorize_commands(self._cfg(port=2222), self._identity())
+        self.assertIn("-p 2222", cmds["powershell"])
+        self.assertIn("-p 2222", cmds["posix"])
+
+    def test_authorize_commands_custom_user(self):
+        cmds = sync_auth._authorize_commands(self._cfg(user="nas"), self._identity())
+        self.assertIn("nas@192.168.1.100", cmds["powershell"])
+
+    def test_default_port_has_no_flag(self):
+        cmds = sync_auth._authorize_commands(self._cfg(), self._identity())
+        self.assertNotIn("-p 22", cmds["powershell"])
+        self.assertNotIn("-p 22", cmds["posix"])
+
+    def test_quote_local_wraps_path(self):
+        quoted = sync_auth._quote_local("/tmp/a b.pub")
+        self.assertTrue(quoted.startswith(("'", '"')))
+        self.assertIn("/tmp/a b.pub", quoted)
+
+
+class TestReadConfig(IsolatedConfigMixin, unittest.TestCase):
+    def test_missing_config_is_empty_dict(self):
+        self.assertEqual(sync_auth._read_config_file(), {})
+
+
 if __name__ == "__main__":
     unittest.main()
